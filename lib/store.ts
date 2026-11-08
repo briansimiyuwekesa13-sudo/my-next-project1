@@ -116,6 +116,16 @@ export function useConversation() {
   return { messages, append, clear, ready, current: ref };
 }
 
+/** Wipes the saved conversation from this device. */
+export function clearHistory(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(HISTORY_KEY);
+  } catch {
+    /* storage may be unavailable in private mode */
+  }
+}
+
 export function newId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `m-${Date.now()}-${Math.random().toString(16).slice(2)}`;
