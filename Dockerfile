@@ -1,11 +1,27 @@
 FROM node:26-alpine
+
+# Refresh base OS packages with the distributor's fixed versions.
 RUN apk upgrade --no-cache
+
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
+
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Dependencies first so the layer is cached across source edits.
+COPY package.json package-lock.json* ./
+RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
 COPY . .
 RUN npm run build
-ENV PORT=3000
+
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
 EXPOSE 3000
-# next start binds 0.0.0.0 and honors $PORT.
-CMD ["npm","start"]
+
+# Run unprivileged; Next may write its image cache at runtime.
+RUN chown -R node:node /app
+USER node
+
+CMD ["npm", "start"]
