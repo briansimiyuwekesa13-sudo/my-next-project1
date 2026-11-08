@@ -21,6 +21,8 @@ export interface AssistantAction {
   href?: string;
   /** Extra context for the UI (e.g. why it needs a permission). */
   detail?: string;
+  /** Internal command for assistant controls, e.g. "stop-listening". */
+  command?: string;
   /** Android intent URI, when the web fallback differs. */
   androidIntent?: string;
 }
