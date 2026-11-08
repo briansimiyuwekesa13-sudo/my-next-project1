@@ -13,6 +13,9 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        // Point this at your deployed Brian instance (Settings → deployment URL).
+        buildConfigField("String", "BRIAN_ENDPOINT", "\"https://brian.appjet.app\"")
     }
 
     buildFeatures {
