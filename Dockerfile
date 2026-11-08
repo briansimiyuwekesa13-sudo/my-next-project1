@@ -1,7 +1,11 @@
 FROM node:26-alpine
 
-# Refresh base OS packages with the distributor's fixed versions.
-RUN apk upgrade --no-cache
+# Refresh base OS packages and force the fixed zlib (ALPINE-CVE-2026-4738).
+# Kept in one RUN with an explicit upgrade so the layer rebuilds with the fix
+# instead of being reused from cache with the vulnerable package.
+RUN apk upgrade --no-cache \
+ && apk add --no-cache --upgrade "zlib>=1.4-r0" \
+ && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 
