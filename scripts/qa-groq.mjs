@@ -66,6 +66,7 @@ const mock = http.createServer((req, res) => {
     }
 
     const messages = Array.isArray(body.messages) ? body.messages : [];
+    const conversation = JSON.stringify(messages);
     const last = messages.filter((m) => m.role === "user").pop();
     const question = (last?.content ?? "").toString();
 
@@ -76,7 +77,9 @@ const mock = http.createServer((req, res) => {
       return send(500, { error: { message: "internal server error" } });
     }
 
-    const reply = /Ada/.test(question)
+    // The mock answers from the whole conversation, so a follow-up that only
+    // names the fact indirectly still gets a context-aware reply.
+    const reply = /Ada/.test(conversation)
       ? "Ada — that's your sister, you mentioned her a moment ago."
       : "Sunlight scatters off air molecules, and blue scatters most, so the sky looks blue.";
 
