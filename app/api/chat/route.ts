@@ -169,19 +169,20 @@ export async function POST(request: Request) {
 
   // Exact, instant utilities stay on-device (time, date, maths, conversions):
   // a model can get those subtly wrong, and they must work with no key at all.
-  const isUtility = local.deterministic === true || action.type !== "none";
+  const hasAction = Boolean(action && action.type !== "none");
+  const isUtility = local.deterministic === true || hasAction;
 
   if (isUtility) {
     const reply =
       local.confident === false
-        ? action.type !== "none"
+        ? hasAction && action
           ? `Okay — ${action.label.toLowerCase()}.`
           : local.reply
         : local.reply;
     return NextResponse.json({
       reply,
       mode: "offline",
-      action: local.action ?? action,
+      action: local.action ?? (hasAction ? action : undefined),
       source: "device",
     });
   }
