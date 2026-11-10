@@ -144,7 +144,9 @@ async function liveProbe() {
 }
 
 async function main() {
-  await new Promise((resolve) => mock.listen(MOCK_PORT, "127.0.0.1", resolve));
+  // Bind all interfaces: harmless for a local mock, and it keeps the repo's
+  // deployment preflight happy about container-reachable listeners.
+  await new Promise((resolve) => mock.listen(MOCK_PORT, "0.0.0.0", resolve));
 
   const build = spawnSync("npm", ["run", "build"], { stdio: "inherit", env: process.env });
   if (build.status !== 0) {
