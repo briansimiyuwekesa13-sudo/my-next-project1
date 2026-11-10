@@ -19,13 +19,51 @@ Android module adds what the browser cannot do:
 
 ## Dependency scanning
 
-The repository's dependency security check resolves the web app's npm packages,
-but it cannot resolve this module. Gradle lockfiles are absent, and producing
-them requires a Gradle toolchain and the Android SDK — neither exists in the
-environment where the web app is built and deployed. So the Android module is
-reported as **uncovered**, not as clean.
+The repository's dependency security check resolves the web app's npm packages
+(80 packages, 0 findings) but it cannot resolve this module: Gradle lockfiles are
+absent, and producing them needs a Gradle toolchain plus the Android SDK, neither
+of which exists in the environment where the web app is built and deployed. The
+scan therefore reports this module as **uncovered / incomplete** — a coverage gap,
+not a clean result.
 
-To close that gap on a machine with Android Studio (or a Gradle install):
+### What was checked directly
+
+Every coordinate declared by this module was queried against the public OSV
+advisory database (`POST https://api.osv.dev/v1/query`, ecosystem `Maven`):
+
+| Coordinate | Version | Advisories |
+| --- | --- | --- |
+| androidx.core:core-ktx | 1.13.1 | none |
+| androidx.lifecycle:lifecycle-runtime-ktx | 2.8.5 | none |
+| androidx.activity:activity-compose | 1.9.2 | none |
+| androidx.compose.ui:ui | 1.7.2 | none |
+| androidx.compose.material3:material3 | 1.3.0 | none |
+| androidx.datastore:datastore-preferences | 1.1.1 | none |
+| org.jetbrains.kotlinx:kotlinx-coroutines-android | 1.8.1 | none |
+| com.squareup.okhttp3:okhttp | 4.12.0 | none |
+| com.android.tools.build:gradle (AGP) | 8.5.2 | none |
+| org.jetbrains.kotlin:kotlin-gradle-plugin | 2.0.20 | **GHSA-r937-wjx7-w2jp / CVE-2026-53914** |
+
+### Known advisory: Kotlin Gradle Plugin
+
+GHSA-r937-wjx7-w2jp ("Unsafe Deserialization in Kotlin Build Cache Enables Code
+Execution") affects `kotlin-gradle-plugin` for every release below `2.4.20-Beta1`.
+No stable fixed release exists yet — the only fix is a beta. It is a **build-time**
+issue: it requires local access from a high-privileged actor and is triggered by
+deserialising build-cache entries, so it is not shipped in the APK and is not
+reachable by the assistant's users.
+
+This project does not enable the Gradle build cache (no `gradle.properties`, no
+`org.gradle.caching` or `buildCache` configuration), so the vulnerable path is not
+active. Moving Kotlin from 2.0.20 to a 2.4.x beta would be an unverifiable major
+toolchain migration for a source-only module, so the version is deliberately left
+at 2.0.20 — revisit when a stable 2.4.x is released.
+
+### What remains uncovered
+
+The transitive graph behind these coordinates is still unscanned; only the direct
+declarations above were resolved. To close that fully, generate real lockfiles on
+a machine with Android Studio (or a Gradle install):
 
 ```bash
 # from android/
