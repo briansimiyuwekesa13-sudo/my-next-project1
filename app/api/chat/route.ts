@@ -1,28 +1,29 @@
 import { NextResponse } from "next/server";
 import { buildSystemPrompt, detectAction, localAnswer } from "@/lib/assistant";
+import {
+  groqChat,
+  noKeyFailure,
+  resolveGroqKey,
+  type GroqFailure,
+  type GroqMessage,
+} from "@/lib/groq";
 import type { AssistantSettings, ChatTurn } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MAX_TURNS = 20;
+/**
+ * Groq's gpt-oss-120b has a large context window, so we send a real thread
+ * rather than the last question alone. This is what makes "and tomorrow?",
+ * "what about the second one?" and pronoun follow-ups work.
+ */
+const MAX_TURNS = 24;
 const MAX_CHARS = 4000;
+const MAX_CONTEXT_CHARS = 24_000;
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 40;
-const PROVIDER_TIMEOUT_MS = 20_000;
-
-/**
- * Keyless, OpenAI-compatible endpoint used when neither the user's own key nor
- * a server key is configured. It is rate limited per IP ("one reply every 45
- * seconds"), which is why the device brain answers first and model answers are
- * cached: the shared quota is spent only on genuinely open-ended questions.
- */
-const COMMUNITY_ENDPOINT = "https://text.pollinations.ai/openai";
-const COMMUNITY_MODEL = "openai";
-
-const CACHE_TTL_MS = 10 * 60_000;
-const CACHE_MAX = 200;
-const answerCache = new Map<string, { reply: string; at: number }>();
+const PROVIDER_TIMEOUT_MS = 25_000;
+const MAX_TOKENS = 700;
 
 const buckets = new Map<string, { count: number; resetAt: number }>();
 
@@ -38,6 +39,14 @@ function isRateLimited(key: string): boolean {
   }
   bucket.count += 1;
   return bucket.count > RATE_MAX;
+}
+
+function clientIp(request: Request): string {
+  return (
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    request.headers.get("x-real-ip") ||
+    "local"
+  );
 }
 
 function sanitizeTurns(raw: unknown): ChatTurn[] {
@@ -67,130 +76,77 @@ function sanitizeSettings(raw: unknown): Partial<AssistantSettings> {
   return out;
 }
 
-/** Accepts only a plausible key string; never logged, never persisted here. */
-function sanitizeKey(raw: unknown): string | undefined {
-  if (typeof raw !== "string") return undefined;
-  const key = raw.trim();
-  if (key.length < 16 || key.length > 220) return undefined;
-  if (!/^[\x21-\x7e]+$/.test(key)) return undefined;
-  return key;
-}
-
-interface Provider {
-  id: "user-key" | "server-key" | "community";
-  endpoint: string;
-  key?: string;
-  model: string;
-}
-
-function buildChain(userKey: string | undefined, useCommunity: boolean): Provider[] {
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const base = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
-  const endpoint = `${base}/chat/completions`;
-
-  const chain: Provider[] = [];
-  if (userKey) chain.push({ id: "user-key", endpoint, key: userKey, model });
-
-  const serverKey = process.env.OPENAI_API_KEY?.trim();
-  if (serverKey && serverKey !== userKey) {
-    chain.push({ id: "server-key", endpoint, key: serverKey, model });
+/** Keeps the most recent turns that fit the context budget. */
+function trimToBudget(turns: ChatTurn[]): ChatTurn[] {
+  const kept: ChatTurn[] = [];
+  let total = 0;
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const turn = turns[i];
+    if (total + turn.content.length > MAX_CONTEXT_CHARS) break;
+    kept.unshift(turn);
+    total += turn.content.length;
   }
-  if (useCommunity) {
-    chain.push({ id: "community", endpoint: COMMUNITY_ENDPOINT, model: COMMUNITY_MODEL });
-  }
-  return chain;
+  return kept;
 }
 
-async function callProvider(
-  provider: Provider,
-  messages: { role: string; content: string }[],
-  signal: AbortSignal,
-): Promise<string> {
-  const response = await fetch(provider.endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(provider.key ? { Authorization: `Bearer ${provider.key}` } : {}),
+function failureResponse(failure: GroqFailure) {
+  // No key material, no upstream headers: only the mapped, speakable message.
+  return NextResponse.json(
+    {
+      error: failure.message,
+      reply: failure.message,
+      hint: failure.hint,
+      code: failure.code,
+      retryAfterMs: failure.retryAfterMs,
+      mode: "offline",
+      source: "groq",
     },
-    body: JSON.stringify({
-      model: provider.model,
-      temperature: 0.7,
-      max_tokens: 320,
-      messages,
-    }),
-    signal,
-  });
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    // Deliberately no headers or key material in this message.
-    throw new Error(`${provider.id}:${response.status}:${detail.slice(0, 120)}`);
-  }
-
-  const data = (await response.json()) as {
-    choices?: { message?: { content?: string } }[];
-  };
-  const reply = data.choices?.[0]?.message?.content?.trim();
-  if (!reply) throw new Error(`${provider.id}:empty`);
-  return reply;
-}
-
-function cacheKey(question: string, personality?: string): string {
-  return `${personality ?? "friendly"}::${question.toLowerCase().replace(/\s+/g, " ").trim()}`;
-}
-
-function readCache(key: string): string | null {
-  const hit = answerCache.get(key);
-  if (!hit) return null;
-  if (Date.now() - hit.at > CACHE_TTL_MS) {
-    answerCache.delete(key);
-    return null;
-  }
-  return hit.reply;
-}
-
-function writeCache(key: string, reply: string) {
-  if (answerCache.size >= CACHE_MAX) {
-    const oldest = answerCache.keys().next().value;
-    if (oldest) answerCache.delete(oldest);
-  }
-  answerCache.set(key, { reply, at: Date.now() });
-}
-
-function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status });
+    { status: failure.status },
+  );
 }
 
 export async function POST(request: Request) {
-  const ip =
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    request.headers.get("x-real-ip") ||
-    "local";
-
-  if (isRateLimited(ip)) {
-    return jsonError("Too many requests — give me a second.", 429);
+  if (isRateLimited(clientIp(request))) {
+    return NextResponse.json(
+      { error: "Too many requests — give me a second.", reply: "Too many requests — give me a second." },
+      { status: 429 },
+    );
   }
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return jsonError("Invalid JSON body.", 400);
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
   const payload = (body ?? {}) as Record<string, unknown>;
   const turns = sanitizeTurns(payload.messages);
-  const lastUser = [...turns].reverse().find((t) => t.role === "user");
+  const lastUserTurn = [...turns].reverse().find((t) => t.role === "user");
 
-  if (!lastUser) {
-    return jsonError("A user message is required.", 400);
+  // The client sends the live utterance separately; older clients only sent it
+  // inside `messages`, so both shapes are accepted.
+  const current =
+    (typeof payload.message === "string" ? payload.message.trim().slice(0, MAX_CHARS) : "") ||
+    lastUserTurn?.content ||
+    "";
+
+  if (!current) {
+    return NextResponse.json({ error: "A user message is required." }, { status: 400 });
+  }
+
+  // Avoid sending the same sentence twice when the client already appended it.
+  const history = [...turns];
+  while (
+    history.length > 0 &&
+    history[history.length - 1].role === "user" &&
+    history[history.length - 1].content === current
+  ) {
+    history.pop();
   }
 
   const settings = sanitizeSettings(payload.settings);
-  const platform: "web" | "android" =
-    payload.platform === "android" ? "android" : "web";
-
-  const now = new Date();
+  const platform: "web" | "android" = payload.platform === "android" ? "android" : "web";
   const timeZone =
     typeof payload.timeZone === "string" && payload.timeZone.length < 64
       ? payload.timeZone
@@ -200,90 +156,79 @@ export async function POST(request: Request) {
     assistantName: settings.assistantName || "Brian",
     personality: settings.personality,
     timeZone,
-    now,
+    now: new Date(),
     platform,
   };
 
-  // Device intents are decided locally so the answer and the action agree.
-  const action = detectAction(lastUser.content, ctx);
-  const local = localAnswer(lastUser.content, ctx);
+  // Device intents are decided locally so the spoken answer and the phone
+  // action always agree. This is phone integration, not the language model.
+  const action = detectAction(current, ctx);
+  const local = localAnswer(current, ctx);
 
-  // 1. The on-device brain answers device commands, maths, conversions, dates
-  //    and known facts instantly — no network, no quota, no waiting.
-  if (local.confident !== false) {
+  const resolved = resolveGroqKey(payload.apiKey);
+
+  // Exact, instant utilities stay on-device (time, date, maths, conversions):
+  // a model can get those subtly wrong, and they must work with no key at all.
+  const isUtility = local.deterministic === true || action.type !== "none";
+
+  if (isUtility) {
+    const reply =
+      local.confident === false
+        ? action.type !== "none"
+          ? `Okay — ${action.label.toLowerCase()}.`
+          : local.reply
+        : local.reply;
     return NextResponse.json({
-      reply: local.reply,
+      reply,
       mode: "offline",
       action: local.action ?? action,
       source: "device",
     });
   }
 
-  // 2. A repeated question is answered from cache instead of spending quota.
-  const key = cacheKey(lastUser.content, settings.personality);
-  const cached = readCache(key);
-  if (cached) {
-    return NextResponse.json({ reply: cached, mode: "ai", action, source: "cache" });
+  if (!resolved) {
+    // No model configured. Answer on-device when the device brain actually
+    // knows the answer; otherwise say plainly that a key is needed. Never
+    // pretend a weak shared model answered.
+    if (local.confident !== false) {
+      return NextResponse.json({
+        reply: local.reply,
+        mode: "offline",
+        action: local.action ?? action,
+        source: "device",
+        note: "Add your Groq API key in Settings for open-ended answers.",
+      });
+    }
+    return failureResponse(noKeyFailure());
   }
 
-  const userKey = sanitizeKey(payload.apiKey);
-  const useCommunity = payload.useCommunityModel !== false;
-  const chain = buildChain(userKey, useCommunity);
-
-  if (chain.length === 0) {
-    return NextResponse.json({
-      reply: local.reply,
-      mode: "offline",
-      action,
-      source: "device",
-      note: "No model connected — answered on-device.",
-    });
-  }
-
-  const messages = [
+  const messages: GroqMessage[] = [
     { role: "system", content: buildSystemPrompt(settings, ctx) },
-    ...turns.map((t) => ({ role: t.role, content: t.content })),
+    ...trimToBudget(history).map((turn) => ({ role: turn.role, content: turn.content })),
+    { role: "user", content: current },
   ];
 
-  const failures: string[] = [];
+  const result = await groqChat({
+    key: resolved.key,
+    messages,
+    maxTokens: MAX_TOKENS,
+    timeoutMs: PROVIDER_TIMEOUT_MS,
+  });
 
-  for (const provider of chain) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
-    try {
-      const reply = await callProvider(provider, messages, controller.signal);
-      writeCache(key, reply);
-      return NextResponse.json({
-        reply,
-        mode: "ai",
-        action,
-        source: "model",
-        model: provider.id === "community" ? "community model" : provider.model,
-        provider: provider.id,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "unknown";
-      failures.push(message);
-      console.error("chat provider failed:", message.slice(0, 200));
-    } finally {
-      clearTimeout(timeout);
-    }
+  if (!result.ok) {
+    // Only the failure code is logged — never the key, prompt or user's words.
+    console.error("groq request failed:", result.failure.code, result.failure.status);
+    return failureResponse(result.failure);
   }
 
-  const keyRejected = failures.some(
-    (f) => f.startsWith("user-key:401") || f.startsWith("user-key:403"),
-  );
-  const quotaExhausted = failures.some((f) => f.startsWith("community:402"));
-
   return NextResponse.json({
-    reply: local.reply,
-    mode: "offline",
+    reply: result.reply,
+    mode: "ai",
     action,
-    source: "device",
-    note: keyRejected
-      ? "That saved key was rejected — check it in Settings."
-      : quotaExhausted
-        ? "The shared model is busy right now — add your own AI key in Settings for instant answers."
-        : "Could not reach a model; answered on-device.",
+    source: "groq",
+    provider: "groq",
+    model: result.model,
+    keySource: resolved.source,
+    usage: result.usage,
   });
 }

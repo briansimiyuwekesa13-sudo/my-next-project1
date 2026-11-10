@@ -1,21 +1,24 @@
 import { NextResponse } from "next/server";
+import { GROQ_BASE_URL, groqModel, serverGroqKey } from "@/lib/groq";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Reports which brain is available, without leaking any key material.
- * The keyless community model means open-ended answers work even before the
- * user connects a key of their own.
+ * There is no community model any more: either the user's Groq key (or a
+ * server-side one) answers, or the app says plainly that none is configured.
  */
 export async function GET() {
-  const serverKey = Boolean(process.env.OPENAI_API_KEY);
   return NextResponse.json({
     mode: "ai",
-    model: serverKey ? process.env.OPENAI_MODEL || "gpt-4o-mini" : "community model",
+    provider: "groq",
+    model: groqModel(),
+    baseUrl: GROQ_BASE_URL,
     providers: {
-      serverKey,
-      community: true,
+      groq: true,
+      serverKey: Boolean(serverGroqKey()),
       userKeySupported: true,
+      community: false,
     },
   });
 }
