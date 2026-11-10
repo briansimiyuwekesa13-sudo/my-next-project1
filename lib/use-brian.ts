@@ -293,6 +293,9 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
             },
             platform: isAndroid ? "android" : "web",
             timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            // Sent per request only; the server never stores or logs it.
+            apiKey: settingsRef.current.apiKey || undefined,
+            useCommunityModel: settingsRef.current.useCommunityModel !== false,
           }),
         });
         if (!response.ok) throw new Error(`Request failed: ${response.status}`);

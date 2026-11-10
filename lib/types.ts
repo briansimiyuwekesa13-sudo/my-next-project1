@@ -61,6 +61,10 @@ export interface AssistantSettings {
   language: string;
   continuousListening: boolean;
   ownerOnly: boolean;
+  /** Optional model key supplied by the user. Stored on this device only. */
+  apiKey: string;
+  /** Allow the keyless community model when no key is configured. */
+  useCommunityModel: boolean;
 }
 
 export const DEFAULT_SETTINGS: AssistantSettings = {
@@ -74,4 +78,6 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   language: "en-US",
   continuousListening: false,
   ownerOnly: false,
+  apiKey: "",
+  useCommunityModel: true,
 };

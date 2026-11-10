@@ -9,6 +9,15 @@ const MAX_TURNS = 20;
 const MAX_CHARS = 4000;
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 40;
+const PROVIDER_TIMEOUT_MS = 20_000;
+
+/**
+ * Keyless, OpenAI-compatible endpoint. Used only when neither the user's own
+ * key nor a server key is configured, so open-ended questions still get a real
+ * answer out of the box. Settings can switch it off for stricter privacy.
+ */
+const COMMUNITY_ENDPOINT = "https://text.pollinations.ai/openai";
+const COMMUNITY_MODEL = "openai";
 
 const buckets = new Map<string, { count: number; resetAt: number }>();
 
@@ -51,6 +60,74 @@ function sanitizeSettings(raw: unknown): Partial<AssistantSettings> {
     out.personality = input.personality;
   }
   return out;
+}
+
+/** Accepts only a plausible key string; never logged, never persisted here. */
+function sanitizeKey(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const key = raw.trim();
+  if (key.length < 16 || key.length > 220) return undefined;
+  if (!/^[\x21-\x7e]+$/.test(key)) return undefined;
+  return key;
+}
+
+interface Provider {
+  id: "user-key" | "server-key" | "community";
+  endpoint: string;
+  key?: string;
+  model: string;
+}
+
+function buildChain(userKey: string | undefined, useCommunity: boolean): Provider[] {
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const base = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+  const endpoint = `${base}/chat/completions`;
+
+  const chain: Provider[] = [];
+  if (userKey) chain.push({ id: "user-key", endpoint, key: userKey, model });
+
+  const serverKey = process.env.OPENAI_API_KEY?.trim();
+  if (serverKey && serverKey !== userKey) {
+    chain.push({ id: "server-key", endpoint, key: serverKey, model });
+  }
+  if (useCommunity) {
+    chain.push({ id: "community", endpoint: COMMUNITY_ENDPOINT, model: COMMUNITY_MODEL });
+  }
+  return chain;
+}
+
+async function callProvider(
+  provider: Provider,
+  messages: { role: string; content: string }[],
+  signal: AbortSignal,
+): Promise<string> {
+  const response = await fetch(provider.endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(provider.key ? { Authorization: `Bearer ${provider.key}` } : {}),
+    },
+    body: JSON.stringify({
+      model: provider.model,
+      temperature: 0.7,
+      max_tokens: 350,
+      messages,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    // Deliberately no headers or key material in this message.
+    throw new Error(`${provider.id}:${response.status}:${detail.slice(0, 120)}`);
+  }
+
+  const data = (await response.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  const reply = data.choices?.[0]?.message?.content?.trim();
+  if (!reply) throw new Error(`${provider.id}:empty`);
+  return reply;
 }
 
 function jsonError(message: string, status: number) {
@@ -103,80 +180,59 @@ export async function POST(request: Request) {
   // Device intents are decided locally so the answer and the action agree.
   const action = detectAction(lastUser.content, ctx);
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const userKey = sanitizeKey(payload.apiKey);
+  const useCommunity = payload.useCommunityModel !== false;
+  const chain = buildChain(userKey, useCommunity);
 
-  if (!apiKey) {
+  if (chain.length === 0) {
     const local = localAnswer(lastUser.content, ctx);
     return NextResponse.json({
       reply: local.reply,
       mode: "offline",
       action: local.action,
-      note: "No model key configured — using the on-device brain.",
+      note: "No model connected — answered on-device.",
     });
   }
 
-  const baseUrl = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25_000);
+  const messages = [
+    { role: "system", content: buildSystemPrompt(settings, ctx) },
+    ...turns.map((t) => ({ role: t.role, content: t.content })),
+  ];
 
-  try {
-    const upstream = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.7,
-        max_tokens: 350,
-        messages: [
-          { role: "system", content: buildSystemPrompt(settings, ctx) },
-          ...turns.map((t) => ({ role: t.role, content: t.content })),
-        ],
-      }),
-      signal: controller.signal,
-    });
+  const failures: string[] = [];
 
-    if (!upstream.ok) {
-      const detail = await upstream.text().catch(() => "");
-      console.error("chat upstream failed", upstream.status, detail.slice(0, 300));
-      const local = localAnswer(lastUser.content, ctx);
+  for (const provider of chain) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+    try {
+      const reply = await callProvider(provider, messages, controller.signal);
       return NextResponse.json({
-        reply: local.reply,
-        mode: "offline",
-        action: local.action,
-        note: `Model unavailable (${upstream.status}); answered locally.`,
+        reply,
+        mode: "ai",
+        action,
+        model: provider.id === "community" ? "community model" : provider.model,
+        provider: provider.id,
       });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown";
+      failures.push(message);
+      console.error("chat provider failed:", message.slice(0, 200));
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const data = (await upstream.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const reply = data.choices?.[0]?.message?.content?.trim();
-
-    if (!reply) {
-      const local = localAnswer(lastUser.content, ctx);
-      return NextResponse.json({
-        reply: local.reply,
-        mode: "offline",
-        action: local.action,
-        note: "Empty model response; answered locally.",
-      });
-    }
-
-    return NextResponse.json({ reply, mode: "ai", action, model });
-  } catch (error) {
-    console.error("chat proxy error", error);
-    const local = localAnswer(lastUser.content, ctx);
-    return NextResponse.json({
-      reply: local.reply,
-      mode: "offline",
-      action: local.action,
-      note: "Could not reach the model; answered locally.",
-    });
-  } finally {
-    clearTimeout(timeout);
   }
+
+  const local = localAnswer(lastUser.content, ctx);
+  const keyRejected = failures.some(
+    (f) => f.startsWith("user-key:401") || f.startsWith("user-key:403"),
+  );
+
+  return NextResponse.json({
+    reply: local.reply,
+    mode: "offline",
+    action: local.action,
+    note: keyRejected
+      ? "That saved key was rejected — check it in Settings."
+      : "Could not reach a model; answered on-device.",
+  });
 }
