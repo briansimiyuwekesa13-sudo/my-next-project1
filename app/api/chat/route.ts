@@ -146,6 +146,14 @@ export async function POST(request: Request) {
   }
 
   const settings = sanitizeSettings(payload.settings);
+
+  // A caller may name a specific Groq model, but the default stays
+  // openai/gpt-oss-120b. Nothing is ever swapped for a weaker model silently:
+  // an unusable name is reported back instead of being replaced.
+  const requestedModel =
+    typeof payload.model === "string" && /^[A-Za-z0-9._:/-]{1,64}$/.test(payload.model.trim())
+      ? payload.model.trim()
+      : undefined;
   const platform: "web" | "android" = payload.platform === "android" ? "android" : "web";
   const timeZone =
     typeof payload.timeZone === "string" && payload.timeZone.length < 64
@@ -211,6 +219,7 @@ export async function POST(request: Request) {
 
   const result = await groqChat({
     key: resolved.key,
+    model: requestedModel,
     messages,
     maxTokens: MAX_TOKENS,
     timeoutMs: PROVIDER_TIMEOUT_MS,

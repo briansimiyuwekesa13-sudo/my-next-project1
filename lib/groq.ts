@@ -18,7 +18,7 @@ export type GroqErrorCode =
   | "model_unavailable"
   | "rate_limited"
   | "timeout"
-  | "upstream"
+  | "upstream_error"
   | "empty_reply"
   | "bad_request";
 
@@ -197,7 +197,7 @@ export function mapGroqFailure(
 
   if (status >= 500) {
     return {
-      code: "upstream",
+      code: "upstream_error",
       status: 502,
       message: "Groq is having trouble answering right now.",
       hint: "Try again in a moment — your key and settings are fine.",
@@ -301,7 +301,7 @@ export async function groqChat(options: {
             hint: "Try again — shorter questions come back faster.",
           }
         : {
-            code: "upstream",
+            code: "upstream_error",
             status: 502,
             message: "I couldn't reach Groq just now.",
             hint: "Check the connection and try again.",
