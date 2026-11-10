@@ -3,11 +3,16 @@
  * Regression check for the chat pipeline.
  *
  * Covers the reported bug ("the app says it can't access its language module")
- * and the design that fixes it:
- *   1. device questions (facts, maths, time) are answered instantly, offline
- *   2. a genuinely open-ended question reaches the model
- *   3. repeating it is served from cache instead of spending model quota
- *   4. no reply may contain the old "isn't connected" excuse
+ * and the contract the Groq upgrade establishes:
+ *   1. device questions (facts, maths, time, conversions) answer instantly,
+ *      with no key and no network
+ *   2. an open-ended question with no key returns an honest no_key message that
+ *      asks for a key — it never quietly uses a shared community model
+ *   3. no reply may contain the old "isn't connected" / "language module" excuse
+ *
+ * Model connectivity, the saved key, conversation context and every Groq error
+ * path are asserted separately by `npm run qa:groq`, which runs against a mock
+ * of Groq's API so no quota is spent.
  *
  * Builds, boots `next start` on a private port, asserts, then exits nonzero on
  * any failure so it can be used as a CI check.
@@ -64,17 +69,6 @@ async function waitForServer(child) {
   throw new Error("server did not become ready in 60s");
 }
 
-async function askOpenEnded() {
-  let result = await post({ messages: [{ role: "user", content: OPEN_ENDED }] });
-  if (result.json?.mode !== "ai") {
-    // The shared model allows roughly one reply per 45s per IP; wait it out once.
-    console.log("info  open-ended fell back, waiting out the shared-model window…");
-    await sleep(50_000);
-    result = await post({ messages: [{ role: "user", content: OPEN_ENDED }] });
-  }
-  return result;
-}
-
 async function main() {
   console.log("building…");
   const build = spawnSync("npm", ["run", "build"], { stdio: "inherit" });
@@ -84,70 +78,68 @@ async function main() {
   }
 
   const nextBin = path.join("node_modules", "next", "dist", "bin", "next");
+  const env = { ...process.env };
+  delete env.GROQ_API_KEY;
+
   const server = spawn(process.execPath, [nextBin, "start", "-p", String(PORT)], {
     stdio: "ignore",
-    env: process.env,
+    env,
   });
+
+  const replies = [];
 
   try {
     await waitForServer(server);
 
-    // 1. A known fact is answered instantly on-device.
-    const fact = await post({
-      messages: [{ role: "user", content: "What is the capital of France?" }],
-    });
+    // 1. A known fact is answered instantly on-device, with no key at all.
+    const fact = await post({ message: "What is the capital of France?" });
     const factReply = fact.json?.reply ?? "";
+    replies.push(factReply);
     console.log(`info  fact: mode=${fact.json?.mode} source=${fact.json?.source} reply=${factReply.slice(0, 120)}`);
     if (fact.status !== 200) fail(`fact question returned HTTP ${fact.status}`);
     else if (!/paris/i.test(factReply)) fail("fact question was not answered with Paris");
     else if (fact.json?.source !== "device") fail("a known fact should be answered on-device");
     else pass("known fact answered on-device");
 
-    // 2. An open-ended question must reach the model.
-    const open = await askOpenEnded();
+    // 2. No key: an open-ended question must say so, not fake an answer.
+    const open = await post({ message: OPEN_ENDED });
     const openReply = open.json?.reply ?? "";
-    console.log(`info  open: mode=${open.json?.mode} source=${open.json?.source} provider=${open.json?.provider ?? "-"}`);
+    replies.push(openReply);
+    console.log(`info  open: status=${open.status} code=${open.json?.code} source=${open.json?.source}`);
     console.log(`info  open reply: ${openReply.slice(0, 200)}`);
-    if (open.json?.mode !== "ai") {
-      fail(`open-ended question did not reach a model (note: ${open.json?.note ?? "none"})`);
-    } else if (openReply.length < 15) {
-      fail("open-ended reply was too short to be a real answer");
-    } else {
-      pass("open-ended question answered by the model");
-    }
+    if (open.status !== 503) fail(`open-ended question without a key should be 503, got ${open.status}`);
+    else if (open.json?.code !== "no_key") fail("open-ended question without a key should report no_key");
+    else if (!/key/i.test(openReply)) fail("the no-key reply should ask for a Groq key");
+    else if (open.json?.source === "community") fail("there must be no community-model fallback");
+    else pass("open-ended question without a key asks for a key instead of falling back");
 
-    // 3. Repeating it must come from cache, not the rate-limited model.
-    const repeat = await post({ messages: [{ role: "user", content: OPEN_ENDED }] });
-    console.log(`info  repeat: mode=${repeat.json?.mode} source=${repeat.json?.source}`);
-    if (repeat.json?.source !== "cache") fail("repeated question should be served from cache");
-    else pass("repeated question served from cache");
-
-    // 4. The reported bug: never blame a missing module.
-    for (const reply of [factReply, openReply, repeat.json?.reply ?? ""]) {
+    // 3. The old excuse must never come back.
+    for (const reply of replies) {
       if (/isn'?t connected|language module|can'?t access/i.test(reply)) {
         fail(`reply still blames a missing module: ${reply.slice(0, 120)}`);
       }
     }
+    pass("no reply blames a missing language module");
 
-    // 5. On-device answers still work with the network model switched off.
-    const conversion = await post({
-      messages: [{ role: "user", content: "convert 20 celsius to fahrenheit" }],
-      useCommunityModel: false,
-    });
+    // 4. Utilities keep working offline.
+    const conversion = await post({ message: "convert 20 celsius to fahrenheit" });
     const conversionReply = conversion.json?.reply ?? "";
     console.log(`info  conversion: mode=${conversion.json?.mode} reply=${conversionReply.slice(0, 120)}`);
     if (conversion.json?.mode !== "offline") fail("conversion should be answered on-device");
     else if (!/68/.test(conversionReply)) fail("20C should convert to 68F");
     else pass("unit conversion answered on-device");
 
-    const time = await post({
-      messages: [{ role: "user", content: "what time is it" }],
-      useCommunityModel: false,
-    });
+    const time = await post({ message: "what time is it" });
     const timeReply = time.json?.reply ?? "";
     console.log(`info  time: mode=${time.json?.mode} reply=${timeReply.slice(0, 120)}`);
     if (!/\d{1,2}[:.]\d{2}/.test(timeReply)) fail("time question did not return a clock time");
     else pass("time answered on-device");
+
+    // 5. A device intent is decided locally, so the words and the action agree.
+    const alarm = await post({ message: "set an alarm for 7am" });
+    console.log(`info  alarm: action=${alarm.json?.action?.type ?? "none"} reply=${(alarm.json?.reply ?? "").slice(0, 80)}`);
+    if (alarm.json?.action?.type !== "alarm") fail("an alarm request should produce an alarm action");
+    else pass("alarm request routed to the phone action");
 
     // 6. Rejections stay sane.
     const empty = await post({ messages: [] });
