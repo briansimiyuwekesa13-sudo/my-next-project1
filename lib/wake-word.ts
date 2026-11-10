@@ -10,6 +10,12 @@ export function normalizeText(input: string): string {
     .toLowerCase()
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[^a-z0-9'+\-*/. ]/g, " ")
+    // Casual spellings, so "how u doing" and "how r u" reach the same intent
+    // as the full sentence instead of falling through to a generic answer.
+    .replace(/\bu\b/g, "you")
+    .replace(/\bur\b/g, "your")
+    .replace(/\bhow r\b/g, "how are")
+    .replace(/\br\b/g, "are")
     .replace(/\s+/g, " ")
     .trim();
 }

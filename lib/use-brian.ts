@@ -10,6 +10,8 @@ import {
 } from "./speech-types";
 import { detectWakeWord } from "./wake-word";
 import { isDuplicateUtterance, shouldIgnoreAsEcho } from "./voice-guard";
+import { UTTERANCE_QUIET_MS, mergeFinal, shouldFlush } from "./utterance-buffer";
+import { MAX_CHECK_INS, checkInDelayMs, pickCheckIn } from "./checkin";
 import { newId, useConversation } from "./store";
 import { compareVoice, clearProfile, loadProfile, saveProfile, VoiceSampler, type VoiceProfile } from "./voiceprint";
 import type { AssistantAction, AssistantSettings, ChatMessage, ChatTurn } from "./types";
@@ -95,6 +97,12 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
   const speechEndedAtRef = useRef(0);
   const lastUtteranceRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
   const wakeAckRef = useRef(0);
+  /** Fragments of the sentence in progress, joined until the user pauses. */
+  const bufferRef = useRef("");
+  const bufferTimerRef = useRef<number | null>(null);
+  /** When the user last actually said something, for the silence check-in. */
+  const lastUserAtRef = useRef(Date.now());
+  const checkInCountRef = useRef(0);
   const busyRef = useRef(false);
   const profileRef = useRef<VoiceProfile | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -241,6 +249,11 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
     setMicOn(false);
     micOnRef.current = false;
     setInterim("");
+    bufferRef.current = "";
+    if (bufferTimerRef.current !== null) {
+      window.clearTimeout(bufferTimerRef.current);
+      bufferTimerRef.current = null;
+    }
     setPhase("idle");
     clearSilenceTimer();
     speakTokenRef.current += 1;
@@ -282,6 +295,9 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
       const text = raw.trim();
       if (!text || busyRef.current) return;
       busyRef.current = true;
+      // The user is engaged: restart the silence clock and allow check-ins again.
+      lastUserAtRef.current = Date.now();
+      checkInCountRef.current = 0;
       setInterim("");
       const userMessage: ChatMessage = {
         id: newId(),
@@ -430,6 +446,21 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
     submitRef.current = (text, source) => void submit(text, source);
   }, [handleUtterance, submit]);
 
+  /**
+   * Answer a whole thought, not the first fragment. Chrome finalises speech in
+   * pieces ("Hi" lands first, the rest follows), so submitting on the first
+   * final piece replied to half a sentence and dropped the remainder.
+   */
+  const flushUtterance = useCallback(() => {
+    if (bufferTimerRef.current !== null) {
+      window.clearTimeout(bufferTimerRef.current);
+      bufferTimerRef.current = null;
+    }
+    const text = bufferRef.current.trim();
+    bufferRef.current = "";
+    if (text) handleUtteranceRef.current(text);
+  }, []);
+
   /* ---------------------- speech recognition -------------------- */
   useEffect(() => {
     if (!micOn) return;
@@ -467,7 +498,14 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
       }
       if (finalText.trim()) {
         setInterim("");
-        handleUtteranceRef.current(finalText.trim());
+        bufferRef.current = mergeFinal(bufferRef.current, finalText.trim());
+        if (bufferTimerRef.current !== null) window.clearTimeout(bufferTimerRef.current);
+        if (shouldFlush(bufferRef.current, 0)) {
+          flushUtterance();
+        } else {
+          // Wait for a short pause so the rest of the sentence can join in.
+          bufferTimerRef.current = window.setTimeout(flushUtterance, UTTERANCE_QUIET_MS);
+        }
       }
     };
 
@@ -483,6 +521,8 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
 
     recognition.onend = () => {
       if (!micOnRef.current) return;
+      // Don't lose a half-captured sentence when the engine cycles.
+      flushUtterance();
       if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current);
       restartTimerRef.current = window.setTimeout(() => {
         if (!micOnRef.current) return;
@@ -515,7 +555,7 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
       }
       recognitionRef.current = null;
     };
-  }, [micOn, engage]);
+  }, [micOn, engage, flushUtterance]);
 
   /* --------------------- owner-voice sampler -------------------- */
   useEffect(() => {
@@ -599,8 +639,40 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
       if ("speechSynthesis" in window) window.speechSynthesis.cancel();
       if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current);
       if (silenceTimerRef.current !== null) window.clearTimeout(silenceTimerRef.current);
+      if (bufferTimerRef.current !== null) window.clearTimeout(bufferTimerRef.current);
     };
   }, []);
+
+  /* ---------------------- silence check-ins -------------------- */
+  useEffect(() => {
+    if (!micOn) return;
+    const id = window.setInterval(() => {
+      const s = settingsRef.current;
+      if (!s.checkInEnabled) return;
+      // Never talk over the user, our own voice, or a request in flight.
+      if (speakingRef.current || busyRef.current) return;
+      if (checkInCountRef.current >= MAX_CHECK_INS) return;
+
+      const baseMs = Math.max(15, s.checkInSeconds || 120) * 1000;
+      const waitMs = checkInDelayMs(baseMs, checkInCountRef.current);
+      if (Date.now() - lastUserAtRef.current < waitMs) return;
+
+      const lastUser = [...historyRef.current].reverse().find((m) => m.role === "user")?.content;
+      const line = pickCheckIn({
+        hour: new Date().getHours(),
+        attempt: checkInCountRef.current,
+        lastUserText: lastUser,
+        assistantName: s.assistantName,
+        seed: Math.floor(Date.now() / 1000),
+      });
+
+      checkInCountRef.current += 1;
+      lastUserAtRef.current = Date.now();
+      append({ id: newId(), role: "assistant", content: line, at: Date.now() });
+      speak(line);
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [micOn, append, speak]);
 
   return {
     messages,

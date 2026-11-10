@@ -608,6 +608,22 @@ export function localAnswer(input: string, ctx: AnswerContext): LocalAnswer {
   }
 
   // Identity & personality
+  // Casual check-ins come first, so "hi, how are you?" is actually answered
+  // instead of matching the bare greeting and ignoring the question.
+  if (
+    /\b(how are you|how's it going|how are things|how you doing|how are you doing|how do you feel|you good|you ok|you okay|how's your day|how is your day|what's up|whats up)\b/.test(
+      norm,
+    )
+  ) {
+    const lines = [
+      "I'm doing well, thanks for asking. How's your day going?",
+      "Pretty good, honestly. What about you?",
+      "All good here. How are you feeling?",
+      "I'm good — glad you asked. What's on your mind?",
+    ];
+    const pick = lines[Math.abs(Math.floor(now.getTime() / 60000)) % lines.length];
+    return { reply: pick };
+  }
   if (/^(hi|hey|hello|yo|good morning|good afternoon|good evening|morning|evening)\b/.test(norm)) {
     return {
       reply: `${greetingFor(now, ctx.timeZone)}. ${name} here — I'm listening.`,
@@ -617,9 +633,6 @@ export function localAnswer(input: string, ctx: AnswerContext): LocalAnswer {
     return {
       reply: `I'm ${name}, your voice assistant. Say “${ctx.assistantName ? "Hey " + name : "Hey Brian"}” any time and I'll be right here.`,
     };
-  }
-  if (/\b(how are you|how's it going|how are things)\b/.test(norm)) {
-    return { reply: `Running smoothly and glad you asked. How are you doing?` };
   }
   if (/\b(thank you|thanks|cheers|appreciate it)\b/.test(norm)) {
     return { reply: `Any time. That's what I'm here for.` };

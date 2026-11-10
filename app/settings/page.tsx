@@ -369,6 +369,32 @@ export default function SettingsPage() {
         />
 
         <Toggle
+          checked={settings.checkInEnabled}
+          onChange={(next) => update({ checkInEnabled: next })}
+          label="Check on me when I'm quiet"
+          hint="After a stretch of silence Brian gently asks if you're still there, then eases off. Only while the microphone is on."
+        />
+
+        {settings.checkInEnabled && (
+          <div className="field">
+            <label htmlFor="checkin">Silence before checking in</label>
+            <select
+              id="checkin"
+              value={settings.checkInSeconds}
+              onChange={(event) => update({ checkInSeconds: Number(event.target.value) })}
+            >
+              <option value={60}>1 minute</option>
+              <option value={120}>2 minutes</option>
+              <option value={300}>5 minutes</option>
+            </select>
+            <div className="sub">
+              Currently {Math.max(1, Math.round((settings.checkInSeconds || 120) / 60))} min of quiet.
+              Further nudges wait longer, and Brian stops after a few.
+            </div>
+          </div>
+        )}
+
+        <Toggle
           checked={settings.ownerOnly}
           onChange={(next) => update({ ownerOnly: next })}
           label="Respond only to my voice"
