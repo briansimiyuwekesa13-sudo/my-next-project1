@@ -8,7 +8,8 @@ import {
   type RecognitionEvent,
   type SpeechRecognitionLike,
 } from "./speech-types";
-import { detectWakeWord, isLikelyEcho } from "./wake-word";
+import { detectWakeWord } from "./wake-word";
+import { isDuplicateUtterance, shouldIgnoreAsEcho } from "./voice-guard";
 import { newId, useConversation } from "./store";
 import { compareVoice, clearProfile, loadProfile, saveProfile, VoiceSampler, type VoiceProfile } from "./voiceprint";
 import type { AssistantAction, AssistantSettings, ChatMessage, ChatTurn } from "./types";
@@ -17,6 +18,7 @@ export type Phase = "idle" | "wake" | "listening" | "thinking" | "speaking" | "e
 
 const ENGAGED_TIMEOUT_MS = 20_000;
 const RESTART_DELAY_MS = 320;
+const WAKE_ACK_WINDOW_MS = 4_000;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -88,6 +90,11 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
   const engagedRef = useRef(engaged);
   const speakingRef = useRef(false);
   const lastSpokenRef = useRef("");
+  /** Bumped on every new reply so an older chunk chain cannot resume. */
+  const speakTokenRef = useRef(0);
+  const speechEndedAtRef = useRef(0);
+  const lastUtteranceRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
+  const wakeAckRef = useRef(0);
   const busyRef = useRef(false);
   const profileRef = useRef<VoiceProfile | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -148,6 +155,9 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
     (text: string) => {
       if (!("speechSynthesis" in window) || !text.trim()) return;
       const synth = window.speechSynthesis;
+      // A new answer replaces the old one: invalidating the previous token stops
+      // its chunk chain, so two replies can never talk over each other.
+      const token = ++speakTokenRef.current;
       synth.cancel();
       const chunks = chunkText(text);
       const voice = preferredVoice(voices, settingsRef.current);
@@ -157,11 +167,14 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
 
       let index = 0;
       const finish = () => {
+        if (token !== speakTokenRef.current) return;
         speakingRef.current = false;
+        speechEndedAtRef.current = Date.now();
         setPhase(engagedRef.current && micOnRef.current ? "listening" : micOnRef.current ? "wake" : "idle");
       };
 
       const speakNext = () => {
+        if (token !== speakTokenRef.current) return; // superseded by a newer reply
         if (index >= chunks.length) {
           finish();
           return;
@@ -186,8 +199,10 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
   );
 
   const interrupt = useCallback(() => {
+    speakTokenRef.current += 1;
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     speakingRef.current = false;
+    speechEndedAtRef.current = Date.now();
     setPhase(engagedRef.current ? "listening" : micOnRef.current ? "wake" : "idle");
   }, []);
 
@@ -228,8 +243,10 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
     setInterim("");
     setPhase("idle");
     clearSilenceTimer();
+    speakTokenRef.current += 1;
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     speakingRef.current = false;
+    speechEndedAtRef.current = Date.now();
   }, [clearSilenceTimer]);
 
   const startListening = useCallback(() => {
@@ -342,9 +359,26 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
     (raw: string) => {
       const text = raw.trim();
       if (!text) return;
+      const now = Date.now();
 
-      // Ignore our own text-to-speech bleeding back into the microphone.
-      if (speakingRef.current && isLikelyEcho(text, lastSpokenRef.current)) return;
+      // Chrome re-delivers the same final transcript, and a recognition restart
+      // replays the tail of the last session. Answering each delivery is what
+      // turned a single "Hi" into several replies.
+      if (isDuplicateUtterance(lastUtteranceRef.current, text, now)) return;
+      lastUtteranceRef.current = { text, at: now };
+
+      // Never answer our own voice: not while speaking, and not during the short
+      // window where the tail of our sentence is still being transcribed.
+      if (
+        shouldIgnoreAsEcho(
+          text,
+          lastSpokenRef.current,
+          speakingRef.current,
+          now - speechEndedAtRef.current,
+        )
+      ) {
+        return;
+      }
       if (speakingRef.current) interrupt(); // barge-in: the user cut me off
 
       const prof = profileRef.current;
@@ -368,8 +402,20 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
           return;
         }
         engage();
+        wakeAckRef.current = now;
         if (hit.remainder) void submit(hit.remainder, "voice");
         else speak("Yes?");
+        return;
+      }
+
+      // Interim results engage us before the final arrives, so the bare wake
+      // word would otherwise be answered a second time.
+      const again = detectWakeWord(text, settingsRef.current.wakeWord);
+      if (again.matched && !again.remainder) {
+        if (now - wakeAckRef.current < WAKE_ACK_WINDOW_MS) return;
+        wakeAckRef.current = now;
+        armSilenceTimer();
+        speak("Yes?");
         return;
       }
 
