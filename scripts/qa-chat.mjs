@@ -2,10 +2,12 @@
 /**
  * Regression check for the chat pipeline.
  *
- * Verifies the bug report "the app says it can't access its language module":
- *   1. a general-knowledge question must get a real answer (model or offline facts)
- *   2. no reply may contain the old "isn't connected" excuse
- *   3. device answers (unit conversion, time) still work with the model switched off
+ * Covers the reported bug ("the app says it can't access its language module")
+ * and the design that fixes it:
+ *   1. device questions (facts, maths, time) are answered instantly, offline
+ *   2. a genuinely open-ended question reaches the model
+ *   3. repeating it is served from cache instead of spending model quota
+ *   4. no reply may contain the old "isn't connected" excuse
  *
  * Builds, boots `next start` on a private port, asserts, then exits nonzero on
  * any failure so it can be used as a CI check.
@@ -17,6 +19,8 @@ const PORT = 3111;
 const BASE = `http://127.0.0.1:${PORT}`;
 const failures = [];
 
+const OPEN_ENDED = "Explain in one sentence why the sky looks blue.";
+
 function fail(message) {
   failures.push(message);
   console.error(`FAIL  ${message}`);
@@ -24,6 +28,10 @@ function fail(message) {
 
 function pass(message) {
   console.log(`PASS  ${message}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function post(payload) {
@@ -37,7 +45,7 @@ async function post(payload) {
   try {
     json = JSON.parse(text);
   } catch {
-    /* asserted below */
+    /* asserted by callers */
   }
   return { status: response.status, json, text };
 }
@@ -51,9 +59,20 @@ async function waitForServer(child) {
     } catch {
       /* not up yet */
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await sleep(1000);
   }
   throw new Error("server did not become ready in 60s");
+}
+
+async function askOpenEnded() {
+  let result = await post({ messages: [{ role: "user", content: OPEN_ENDED }] });
+  if (result.json?.mode !== "ai") {
+    // The shared model allows roughly one reply per 45s per IP; wait it out once.
+    console.log("info  open-ended fell back, waiting out the shared-model window…");
+    await sleep(50_000);
+    result = await post({ messages: [{ role: "user", content: OPEN_ENDED }] });
+  }
+  return result;
 }
 
 async function main() {
@@ -73,26 +92,44 @@ async function main() {
   try {
     await waitForServer(server);
 
-    // 1. General knowledge must be answered.
-    const general = await post({
+    // 1. A known fact is answered instantly on-device.
+    const fact = await post({
       messages: [{ role: "user", content: "What is the capital of France?" }],
     });
-    const generalReply = general.json?.reply ?? "";
-    console.log(`info  general: mode=${general.json?.mode} provider=${general.json?.provider ?? "-"}`);
-    console.log(`info  general reply: ${generalReply.slice(0, 160)}`);
+    const factReply = fact.json?.reply ?? "";
+    console.log(`info  fact: mode=${fact.json?.mode} source=${fact.json?.source} reply=${factReply.slice(0, 120)}`);
+    if (fact.status !== 200) fail(`fact question returned HTTP ${fact.status}`);
+    else if (!/paris/i.test(factReply)) fail("fact question was not answered with Paris");
+    else if (fact.json?.source !== "device") fail("a known fact should be answered on-device");
+    else pass("known fact answered on-device");
 
-    if (general.status !== 200) fail(`general question returned HTTP ${general.status}`);
-    if (!/paris/i.test(generalReply)) fail("general question was not answered with Paris");
-    else pass("general knowledge question answered");
+    // 2. An open-ended question must reach the model.
+    const open = await askOpenEnded();
+    const openReply = open.json?.reply ?? "";
+    console.log(`info  open: mode=${open.json?.mode} source=${open.json?.source} provider=${open.json?.provider ?? "-"}`);
+    console.log(`info  open reply: ${openReply.slice(0, 200)}`);
+    if (open.json?.mode !== "ai") {
+      fail(`open-ended question did not reach a model (note: ${open.json?.note ?? "none"})`);
+    } else if (openReply.length < 15) {
+      fail("open-ended reply was too short to be a real answer");
+    } else {
+      pass("open-ended question answered by the model");
+    }
 
-    // 2. The reported bug: never blame a missing language module.
-    for (const reply of [generalReply]) {
+    // 3. Repeating it must come from cache, not the rate-limited model.
+    const repeat = await post({ messages: [{ role: "user", content: OPEN_ENDED }] });
+    console.log(`info  repeat: mode=${repeat.json?.mode} source=${repeat.json?.source}`);
+    if (repeat.json?.source !== "cache") fail("repeated question should be served from cache");
+    else pass("repeated question served from cache");
+
+    // 4. The reported bug: never blame a missing module.
+    for (const reply of [factReply, openReply, repeat.json?.reply ?? ""]) {
       if (/isn'?t connected|language module|can'?t access/i.test(reply)) {
         fail(`reply still blames a missing module: ${reply.slice(0, 120)}`);
       }
     }
 
-    // 3. On-device answers still work with the network model switched off.
+    // 5. On-device answers still work with the network model switched off.
     const conversion = await post({
       messages: [{ role: "user", content: "convert 20 celsius to fahrenheit" }],
       useCommunityModel: false,
@@ -100,7 +137,7 @@ async function main() {
     const conversionReply = conversion.json?.reply ?? "";
     console.log(`info  conversion: mode=${conversion.json?.mode} reply=${conversionReply.slice(0, 120)}`);
     if (conversion.json?.mode !== "offline") fail("conversion should be answered on-device");
-    if (!/68/.test(conversionReply)) fail("20C should convert to 68F");
+    else if (!/68/.test(conversionReply)) fail("20C should convert to 68F");
     else pass("unit conversion answered on-device");
 
     const time = await post({
@@ -112,7 +149,7 @@ async function main() {
     if (!/\d{1,2}[:.]\d{2}/.test(timeReply)) fail("time question did not return a clock time");
     else pass("time answered on-device");
 
-    // 4. Rejections stay sane.
+    // 6. Rejections stay sane.
     const empty = await post({ messages: [] });
     if (empty.status !== 400) fail(`empty message should be 400, got ${empty.status}`);
     else pass("empty message rejected");
