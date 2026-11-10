@@ -28,8 +28,10 @@ not a clean result.
 
 ### What was checked directly
 
-Every coordinate declared by this module was queried against the public OSV
-advisory database (`POST https://api.osv.dev/v1/query`, ecosystem `Maven`):
+Every dependency coordinate declared by this module was queried against the
+public OSV advisory database (`POST https://api.osv.dev/v1/query`, ecosystem
+`Maven`). The single build-time artifact that could not be queried here is
+recorded below the table, so this list is not mistaken for full coverage:
 
 | Coordinate | Version | Advisories |
 | --- | --- | --- |
@@ -43,6 +45,23 @@ advisory database (`POST https://api.osv.dev/v1/query`, ecosystem `Maven`):
 | com.squareup.okhttp3:okhttp | 4.12.0 | none |
 | com.android.tools.build:gradle (AGP) | 8.5.2 | none |
 | org.jetbrains.kotlin:kotlin-gradle-plugin | 2.0.20 | **GHSA-r937-wjx7-w2jp / CVE-2026-53914** |
+
+### Not queried: the Compose compiler extension
+
+`composeOptions.kotlinCompilerExtensionVersion = "1.5.15"` in
+`app/build.gradle.kts` resolves `androidx.compose.compiler:compiler:1.5.15` at
+build time. It is deliberately absent from the table above: an OSV lookup needs
+an outbound request, and outbound requests from the sandbox used to build this
+repository are restricted. The managed scanner cannot reach it either without a
+resolved lockfile. It is a Kotlin compiler plugin that runs only while compiling
+and is never packaged into the APK, so it does not ship to users. To finish the
+direct inventory, run this from a machine with network access:
+
+```bash
+curl -s -X POST https://api.osv.dev/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"package":{"name":"androidx.compose.compiler:compiler","ecosystem":"Maven"},"version":"1.5.15"}'
+```
 
 ### Known advisory: Kotlin Gradle Plugin
 
