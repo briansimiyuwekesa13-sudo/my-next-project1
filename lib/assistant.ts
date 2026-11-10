@@ -347,6 +347,212 @@ export function detectAction(
  * Offline conversational brain
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Offline extras: conversions, dates, spelling, general facts
+ * ------------------------------------------------------------------ */
+
+const UNIT_ALIASES: Record<string, string> = {
+  c: "c", celsius: "c", centigrade: "c",
+  f: "f", fahrenheit: "f",
+  km: "km", kilometer: "km", kilometers: "km", kilometre: "km", kilometres: "km",
+  mi: "mi", mile: "mi", miles: "mi",
+  kg: "kg", kilogram: "kg", kilograms: "kg", kilo: "kg", kilos: "kg",
+  lb: "lb", lbs: "lb", pound: "lb", pounds: "lb",
+  cm: "cm", centimeter: "cm", centimeters: "cm", centimetre: "cm", centimetres: "cm",
+  in: "in", inch: "in", inches: "in",
+  m: "m", meter: "m", meters: "m", metre: "m", metres: "m",
+  ft: "ft", foot: "ft", feet: "ft",
+  l: "l", liter: "l", liters: "l", litre: "l", litres: "l",
+  gal: "gal", gallon: "gal", gallons: "gal",
+  g: "g", gram: "g", grams: "g",
+  oz: "oz", ounce: "oz", ounces: "oz",
+};
+
+const CONVERSIONS: Record<string, (value: number) => number> = {
+  "c>f": (v) => (v * 9) / 5 + 32,
+  "f>c": (v) => ((v - 32) * 5) / 9,
+  "km>mi": (v) => v * 0.621371,
+  "mi>km": (v) => v * 1.609344,
+  "kg>lb": (v) => v * 2.204623,
+  "lb>kg": (v) => v / 2.204623,
+  "cm>in": (v) => v / 2.54,
+  "in>cm": (v) => v * 2.54,
+  "m>ft": (v) => v * 3.28084,
+  "ft>m": (v) => v / 3.28084,
+  "l>gal": (v) => v * 0.264172,
+  "gal>l": (v) => v * 3.785412,
+  "g>oz": (v) => v * 0.035274,
+  "oz>g": (v) => v * 28.34952,
+};
+
+const UNIT_LABELS: Record<string, string> = {
+  c: "\u00b0C", f: "\u00b0F", km: "km", mi: "miles", kg: "kg", lb: "lb",
+  cm: "cm", in: "inches", m: "m", ft: "feet", l: "litres", gal: "gallons",
+  g: "g", oz: "oz",
+};
+
+function roundTo(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function tryConversion(norm: string): string | null {
+  const match = norm.match(
+    /(-?\d+(?:\.\d+)?)\s*(?:degrees?\s+)?([a-z]+)\s+(?:in|to|into|as)\s+([a-z]+)/,
+  );
+  if (!match) return null;
+  const value = Number(match[1]);
+  const from = UNIT_ALIASES[match[2]];
+  const to = UNIT_ALIASES[match[3]];
+  if (!from || !to || from === to) return null;
+  const convert = CONVERSIONS[`${from}>${to}`];
+  if (!convert) return null;
+  return `${roundTo(value)} ${UNIT_LABELS[from]} is ${roundTo(convert(value))} ${UNIT_LABELS[to]}.`;
+}
+
+const HOLIDAYS: Record<string, [number, number]> = {
+  christmas: [11, 25],
+  "christmas day": [11, 25],
+  "new year": [0, 1],
+  "new years": [0, 1],
+  "new years day": [0, 1],
+  halloween: [9, 31],
+  "valentines day": [1, 14],
+  "fourth of july": [6, 4],
+  "independence day": [6, 4],
+  "st patricks day": [2, 17],
+};
+
+function tryDateMath(norm: string, now: Date): string | null {
+  const match = norm.match(/how many days (?:until|till|to)\s+(.+)$/);
+  if (!match) return null;
+  const target = match[1].replace(/[?!.]+$/, "").trim();
+  if (!target) return null;
+
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const holiday = HOLIDAYS[target];
+  let when: number | null = null;
+
+  if (holiday) {
+    const thisYear = new Date(now.getFullYear(), holiday[0], holiday[1]).getTime();
+    when = thisYear < startOfToday
+      ? new Date(now.getFullYear() + 1, holiday[0], holiday[1]).getTime()
+      : thisYear;
+  } else {
+    const parsed = Date.parse(target);
+    if (Number.isFinite(parsed)) when = parsed;
+  }
+
+  if (when === null) return null;
+  const days = Math.round((when - startOfToday) / 86_400_000);
+  if (days === 0) return "That's today.";
+  if (days < 0) return `That was ${Math.abs(days)} days ago.`;
+  return `${days} day${days === 1 ? "" : "s"} to go.`;
+}
+
+function tryWordPlay(norm: string): string | null {
+  const spell = norm.match(/how do you spell\s+(.+)$/);
+  if (spell) {
+    const word = spell[1].replace(/[^a-z]/g, "");
+    if (word.length > 0 && word.length < 40) {
+      return `${word.toUpperCase()} \u2014 ${word.toUpperCase().split("").join("-")}.`;
+    }
+  }
+
+  const letters = norm.match(/how many letters (?:are )?(?:in|does)\s+(?:the word\s+)?([a-z]+)/);
+  if (letters) return `"${letters[1]}" has ${letters[1].length} letters.`;
+
+  const pick = norm.match(/^(?:pick|choose|decide|help me choose)(?:\s+one)?(?:\s+between|\s+from)?\s+(.+)$/);
+  if (pick && /\bor\b|,/.test(pick[1])) {
+    const options = pick[1]
+      .split(/\s+or\s+|,\s*/)
+      .map((option) => option.replace(/[?.!]+$/, "").trim())
+      .filter(Boolean);
+    if (options.length >= 2) {
+      return `I'd go with ${options[Math.floor(Math.random() * options.length)]}.`;
+    }
+  }
+
+  const random = norm.match(/random number(?:\s+between\s+(\d+)\s+and\s+(\d+))?/);
+  if (random) {
+    const a = random[1] ? Number(random[1]) : 1;
+    const b = random[2] ? Number(random[2]) : 100;
+    const low = Math.min(a, b);
+    const high = Math.max(a, b);
+    return `${low + Math.floor(Math.random() * (high - low + 1))}.`;
+  }
+
+  return null;
+}
+
+const CAPITALS: Record<string, string> = {
+  france: "Paris", germany: "Berlin", italy: "Rome", spain: "Madrid",
+  portugal: "Lisbon", england: "London", britain: "London", "the uk": "London",
+  ireland: "Dublin", "the netherlands": "Amsterdam", holland: "Amsterdam",
+  belgium: "Brussels", switzerland: "Bern", austria: "Vienna",
+  sweden: "Stockholm", norway: "Oslo", denmark: "Copenhagen", finland: "Helsinki",
+  poland: "Warsaw", greece: "Athens", turkey: "Ankara", russia: "Moscow",
+  ukraine: "Kyiv", canada: "Ottawa", "the usa": "Washington, D.C.",
+  "the united states": "Washington, D.C.", america: "Washington, D.C.",
+  mexico: "Mexico City", brazil: "Bras\u00edlia", argentina: "Buenos Aires",
+  chile: "Santiago", peru: "Lima", colombia: "Bogot\u00e1", japan: "Tokyo",
+  china: "Beijing", india: "New Delhi", "south korea": "Seoul",
+  thailand: "Bangkok", vietnam: "Hanoi", indonesia: "Jakarta",
+  "the philippines": "Manila", australia: "Canberra", "new zealand": "Wellington",
+  egypt: "Cairo", kenya: "Nairobi", nigeria: "Abuja", "south africa": "Pretoria",
+  morocco: "Rabat", israel: "Jerusalem", "saudi arabia": "Riyadh",
+  pakistan: "Islamabad", bangladesh: "Dhaka",
+};
+
+const FACTS: { test: RegExp; answer: string }[] = [
+  { test: /\blargest planet\b/, answer: "Jupiter is the largest planet in the solar system." },
+  { test: /\b(?:closest planet|planet closest to the sun)\b/, answer: "Mercury is the closest planet to the Sun." },
+  { test: /\bhow many planets\b/, answer: "Eight planets orbit the Sun." },
+  { test: /\bboiling point of water\b/, answer: "Water boils at 100 \u00b0C \u2014 212 \u00b0F \u2014 at sea level." },
+  { test: /\bfreezing point of water\b/, answer: "Water freezes at 0 \u00b0C, which is 32 \u00b0F." },
+  { test: /\bspeed of light\b/, answer: "Light travels at about 299,792 kilometres per second." },
+  { test: /\blargest ocean\b/, answer: "The Pacific is the largest ocean." },
+  { test: /\blongest river\b/, answer: "The Nile is usually named the longest river, with the Amazon a close second." },
+  { test: /\bhow many continents\b/, answer: "There are seven continents." },
+  { test: /\b(?:tallest|highest) mountain\b/, answer: "Mount Everest is the tallest mountain above sea level." },
+  { test: /\bchemical (?:symbol|formula) for water\b/, answer: "Water is H\u2082O." },
+  { test: /\bchemical symbol for gold\b/, answer: "Gold's chemical symbol is Au." },
+  { test: /\b(?:what is pi|value of pi)\b/, answer: "Pi is about 3.14159." },
+  { test: /\bwho (?:wrote|is the author of)\b.*\b(?:romeo and juliet|hamlet|macbeth)\b/, answer: "William Shakespeare wrote that." },
+  { test: /\bwho painted the mona lisa\b/, answer: "Leonardo da Vinci painted the Mona Lisa." },
+  { test: /\bcurrency of japan\b/, answer: "Japan uses the yen." },
+  { test: /\blargest country\b/, answer: "Russia is the largest country by area." },
+  { test: /\bsmallest country\b/, answer: "Vatican City is the smallest country in the world." },
+  { test: /\blanguage (?:do they speak|is spoken) in brazil\b/, answer: "Portuguese is the official language of Brazil." },
+  { test: /\bhow many strings (?:does|are on) (?:a|the) guitar\b/, answer: "A standard guitar has six strings." },
+  { test: /\bpowerhouse of the cell\b/, answer: "The mitochondria." },
+  { test: /\bhow many days in a leap year\b/, answer: "366 days." },
+  { test: /\bhow many days in a year\b/, answer: "365 days, or 366 in a leap year." },
+  { test: /\bhow many (?:minutes|seconds) in a minute\b/, answer: "Sixty." },
+  { test: /\bhow many minutes in an hour\b/, answer: "Sixty." },
+  { test: /\bhow many seconds in an hour\b/, answer: "Three thousand six hundred." },
+  { test: /\bhow many hours in a day\b/, answer: "Twenty-four." },
+  { test: /\bhow many weeks in a year\b/, answer: "Fifty-two, plus a day or two." },
+  { test: /\bhow many sides does a (triangle|square|hexagon|pentagon|octagon)\b/, answer: "A triangle has three, a square four, a pentagon five, a hexagon six and an octagon eight." },
+  { test: /\b(?:what|which) (?:is|was) the (?:first|closest) planet\b/, answer: "Mercury is the closest planet to the Sun." },
+  { test: /\bwho is the president of the (?:usa|united states)\b/, answer: "I can't check live news offline \u2014 connect a model key in Settings and I'll look it up for you." },
+];
+
+function tryFacts(norm: string): string | null {
+  const capital = norm.match(/capital (?:city )?of\s+([a-z ]+)$/);
+  if (capital) {
+    const country = capital[1].trim();
+    const city = CAPITALS[country];
+    if (city) {
+      const pretty = country.replace(/\b\w/g, (letter) => letter.toUpperCase());
+      return `The capital of ${pretty} is ${city}.`;
+    }
+  }
+  for (const fact of FACTS) {
+    if (fact.test.test(norm)) return fact.answer;
+  }
+  return null;
+}
+
 export function localAnswer(input: string, ctx: AnswerContext): LocalAnswer {
   const norm = normalizeText(input);
   const name = ctx.assistantName || "Brian";
@@ -440,10 +646,22 @@ export function localAnswer(input: string, ctx: AnswerContext): LocalAnswer {
   const math = tryMath(norm);
   if (math) return { reply: math };
 
-  // Fallback: be honest, stay useful.
+  const conversion = tryConversion(norm);
+  if (conversion) return { reply: conversion };
+
+  const dateMath = tryDateMath(norm, now);
+  if (dateMath) return { reply: dateMath };
+
+  const wordPlay = tryWordPlay(norm);
+  if (wordPlay) return { reply: wordPlay };
+
+  const facts = tryFacts(norm);
+  if (facts) return { reply: facts };
+
+  // Last resort: never blame a missing module, just ask again.
   return {
     reply:
-      "That one needs my language model, which isn't connected yet. I can still handle the time, calls, alarms, reminders, apps and maths — or you can add a model key in Settings and I'll answer anything.",
+      "I didn't quite catch that one. Say it again in a moment, or add your own AI key in Settings and I'll answer anything \u2014 I can already handle the time, maths, conversions, calls, alarms, reminders and apps.",
   };
 }
 

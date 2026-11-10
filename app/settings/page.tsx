@@ -6,6 +6,68 @@ import { clearHistory, useSettings } from "@/lib/store";
 import { DEFAULT_SETTINGS, type Personality } from "@/lib/types";
 import { VoiceSampler, clearProfile, loadProfile, saveProfile, type VoiceProfile } from "@/lib/voiceprint";
 
+function KeyField({
+  saved,
+  onSave,
+  onClear,
+}: {
+  saved: boolean;
+  onSave: (key: string) => void;
+  onClear: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const valid = draft.trim().length >= 16;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <label htmlFor="model-key" style={{ fontSize: 12.5, fontWeight: 600 }}>
+        Your AI model key {saved ? "\u2014 saved on this device" : "(optional)"}
+      </label>
+      <div className="row" style={{ gap: 8, marginTop: 8 }}>
+        <input
+          id="model-key"
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={saved ? "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" : "sk-..."}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            background: "rgba(10,18,32,0.85)",
+            border: "1px solid rgba(126,158,214,0.28)",
+            borderRadius: 10,
+            color: "inherit",
+            padding: "10px 12px",
+            fontSize: 13,
+            outline: "none",
+          }}
+        />
+        <button
+          type="button"
+          className="btn"
+          disabled={!valid}
+          onClick={() => {
+            onSave(draft.trim());
+            setDraft("");
+          }}
+          style={{ borderColor: "rgba(90,200,250,0.5)", color: "#8fe3ff" }}
+        >
+          Save
+        </button>
+        {saved && (
+          <button type="button" className="btn" onClick={onClear}>
+            Clear
+          </button>
+        )}
+      </div>
+      <div className="sub" style={{ color: "var(--muted)", fontSize: 11.5, lineHeight: 1.6, marginTop: 6 }}>
+        Any OpenAI-compatible key works. It stays in this browser and is sent with each question only to fetch the answer \u2014 the server never stores it.
+      </div>
+    </div>
+  );
+}
+
 const WAKE_SUGGESTIONS = ["Hey Brian", "Hey Sophie", "Computer", "Okay Jarvis", "Hey Assistant"];
 
 const LANGUAGES = [
@@ -354,6 +416,25 @@ export default function SettingsPage() {
         <div className="sub" style={{ color: "var(--muted)", fontSize: 11.5, lineHeight: 1.6 }}>
           Conversation context is kept for the current chat only, and history stays on this device.
         </div>
+
+        <KeyField
+          saved={Boolean(settings.apiKey)}
+          onSave={(key) => {
+            update({ apiKey: key });
+            setNotice("Model key saved on this device.");
+          }}
+          onClear={() => {
+            update({ apiKey: "" });
+            setNotice("Model key removed from this device.");
+          }}
+        />
+
+        <Toggle
+          checked={settings.useCommunityModel !== false}
+          onChange={(next) => update({ useCommunityModel: next })}
+          label="Community model fallback"
+          hint="When no key is saved, send open-ended questions to a shared public model so you still get real answers. Turn it off to keep every question on-device."
+        />
       </section>
 
       <section className="card">
