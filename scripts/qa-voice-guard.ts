@@ -16,6 +16,12 @@ import {
   normalizeUtterance,
   shouldIgnoreAsEcho,
 } from "../lib/voice-guard";
+import { UTTERANCE_QUIET_MS, mergeFinal, shouldFlush } from "../lib/utterance-buffer";
+import { MAX_CHECK_INS, checkInDelayMs, pickCheckIn } from "../lib/checkin";
+import { localAnswer } from "../lib/assistant";
+
+type AnswerCtx = Parameters<typeof localAnswer>[1];
+type CheckInCtx = Parameters<typeof pickCheckIn>[0];
 
 let failures = 0;
 function check(name: string, fn: () => void) {
@@ -142,6 +148,104 @@ check("grace window is bounded", () => {
   const spoken = "I'm doing great, thanks for asking.";
   assert.equal(shouldIgnoreAsEcho("doing great thanks for asking", spoken, false, 200), true);
   assert.equal(shouldIgnoreAsEcho("doing great thanks for asking", spoken, false, ECHO_GRACE_MS + 50), false);
+});
+
+/* ------------------ sentence assembly (the "only Hi" bug) ------------------ */
+
+check("a fragment that ends mid-thought waits for the rest of the sentence", () => {
+  assert.equal(shouldFlush("Hi", 0), false);
+  assert.equal(shouldFlush("Hi I was wondering if you could", 0), false);
+});
+
+check("a complete sentence is answered immediately", () => {
+  assert.equal(shouldFlush("How are you doing?", 0), true);
+  assert.equal(shouldFlush("What time is it.", 0), true);
+});
+
+check("a pause always releases whatever was captured", () => {
+  assert.equal(shouldFlush("Hi I was wondering", UTTERANCE_QUIET_MS), true);
+});
+
+check("replayed fragments are not duplicated in the sentence", () => {
+  const merged = normalizeUtterance(mergeFinal("Hi how are you", "how are you"));
+  assert.equal(merged.split("how are you").length - 1, 1, merged);
+  assert.ok(merged.includes("hi"), merged);
+});
+
+check("the whole thought is submitted once, not the first word", () => {
+  // Chrome finalises "Hi" first, then delivers the rest of the same sentence.
+  let buffer = "";
+  const submitted: string[] = [];
+  for (const text of ["Hi", "how are you doing", "how are you doing"]) {
+    buffer = mergeFinal(buffer, text);
+    if (shouldFlush(buffer, 0)) {
+      submitted.push(buffer);
+      buffer = "";
+    }
+  }
+  if (buffer) submitted.push(buffer); // quiet window or engine restart released it
+  assert.deepEqual(submitted, ["Hi how are you doing"]);
+});
+
+/* ------------------------- human-like small talk ------------------------- */
+
+const answerCtx = {
+  assistantName: "Brian",
+  timeZone: "UTC",
+  now: new Date("2026-11-10T09:00:00Z"),
+} as unknown as AnswerCtx;
+
+const WARM = /doing (well|good)|pretty good|all good|i'm good/i;
+
+check('"how u doing" gets a warm answer instead of a fallback', () => {
+  const { reply } = localAnswer("how u doing", answerCtx);
+  assert.ok(WARM.test(reply), reply);
+});
+
+check("casual spellings reach the same intent", () => {
+  assert.ok(WARM.test(localAnswer("how r u", answerCtx).reply));
+  assert.ok(WARM.test(localAnswer("you good?", answerCtx).reply));
+});
+
+check("a greeting still works", () => {
+  const { reply } = localAnswer("hi", answerCtx);
+  assert.ok(/brian here|listening|morning|afternoon|evening/i.test(reply), reply);
+});
+
+check("greeting plus a question answers the question", () => {
+  const { reply } = localAnswer("hi, how are you?", answerCtx);
+  assert.ok(WARM.test(reply), reply);
+});
+
+/* ---------------------------- silence check-ins ---------------------------- */
+
+const ci = (o: Record<string, unknown>) => pickCheckIn(o as unknown as CheckInCtx);
+
+check("a check-in waits the configured silence before speaking", () => {
+  assert.equal(checkInDelayMs(120_000, 0), 120_000);
+  assert.ok(checkInDelayMs(120_000, 1) > 120_000);
+});
+
+check("check-ins are varied and stop after a few", () => {
+  const lines = new Set<string>();
+  for (let seed = 0; seed < 40; seed += 1) {
+    lines.add(ci({ hour: 14, attempt: 0, assistantName: "Brian", seed }));
+  }
+  assert.ok(lines.size >= 3, `only ${lines.size} distinct lines`);
+  assert.ok(MAX_CHECK_INS >= 2 && MAX_CHECK_INS <= 5, String(MAX_CHECK_INS));
+});
+
+check("a late-night check-in does not say good morning", () => {
+  for (let seed = 0; seed < 40; seed += 1) {
+    const line = ci({ hour: 2, attempt: 0, assistantName: "Brian", seed });
+    assert.ok(!/morning/i.test(line), line);
+  }
+});
+
+check("a check-in is a spoken line, not an empty string", () => {
+  for (let seed = 0; seed < 20; seed += 1) {
+    assert.ok(ci({ hour: 9, attempt: 0, seed }).trim().length > 5);
+  }
 });
 
 if (failures > 0) {
