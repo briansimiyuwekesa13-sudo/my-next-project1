@@ -38,6 +38,8 @@ export interface ChatMessage extends ChatTurn {
   mode?: "ai" | "offline";
   action?: AssistantAction;
   source?: "voice" | "typed";
+  /** Honest explanation when a reply came from the on-device brain. */
+  note?: string;
 }
 
 export interface AssistantReply {

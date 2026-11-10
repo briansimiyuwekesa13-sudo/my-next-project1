@@ -227,6 +227,9 @@ export default function Home() {
               {message.role === "assistant" && message.mode === "offline" && <span className="local">local brain</span>}
               {message.role === "user" && message.source === "voice" && <span>voice</span>}
             </div>
+            {message.role === "assistant" && message.note && (
+              <div className="bubble-note">{message.note}</div>
+            )}
           </div>
         ))}
 

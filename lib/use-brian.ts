@@ -304,6 +304,7 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
           mode?: "ai" | "offline";
           action?: AssistantAction;
           model?: string;
+          note?: string;
         };
         const reply = (data.reply ?? "").trim() || "I'm here, but I didn't catch that.";
         append({
@@ -313,6 +314,7 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
           at: Date.now(),
           mode: data.mode ?? "offline",
           action: data.action,
+          note: data.note,
         });
         setAiMode(data.mode ?? "offline");
         if (data.model) setModel(data.model);
