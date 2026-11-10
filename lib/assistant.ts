@@ -12,6 +12,8 @@ export interface AnswerContext {
 export interface LocalAnswer {
   reply: string;
   action?: AssistantAction;
+  /** False when the on-device brain had no confident answer. */
+  confident?: boolean;
 }
 
 /* ------------------------------------------------------------------ *
@@ -660,6 +662,7 @@ export function localAnswer(input: string, ctx: AnswerContext): LocalAnswer {
 
   // Last resort: never blame a missing module, just ask again.
   return {
+    confident: false,
     reply:
       "I didn't quite catch that one. Say it again in a moment, or add your own AI key in Settings and I'll answer anything \u2014 I can already handle the time, maths, conversions, calls, alarms, reminders and apps.",
   };

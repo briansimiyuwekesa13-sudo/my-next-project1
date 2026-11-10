@@ -433,7 +433,7 @@ export default function SettingsPage() {
           checked={settings.useCommunityModel !== false}
           onChange={(next) => update({ useCommunityModel: next })}
           label="Community model fallback"
-          hint="When no key is saved, send open-ended questions to a shared public model so you still get real answers. Turn it off to keep every question on-device."
+          hint="When no key is saved, open-ended questions go to a shared public model. It is rate-limited, so a key of your own gives instant, private answers. Turn this off to keep every question on-device."
         />
       </section>
 

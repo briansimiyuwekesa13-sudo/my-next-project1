@@ -12,12 +12,17 @@ const RATE_MAX = 40;
 const PROVIDER_TIMEOUT_MS = 20_000;
 
 /**
- * Keyless, OpenAI-compatible endpoint. Used only when neither the user's own
- * key nor a server key is configured, so open-ended questions still get a real
- * answer out of the box. Settings can switch it off for stricter privacy.
+ * Keyless, OpenAI-compatible endpoint used when neither the user's own key nor
+ * a server key is configured. It is rate limited per IP ("one reply every 45
+ * seconds"), which is why the device brain answers first and model answers are
+ * cached: the shared quota is spent only on genuinely open-ended questions.
  */
 const COMMUNITY_ENDPOINT = "https://text.pollinations.ai/openai";
 const COMMUNITY_MODEL = "openai";
+
+const CACHE_TTL_MS = 10 * 60_000;
+const CACHE_MAX = 200;
+const answerCache = new Map<string, { reply: string; at: number }>();
 
 const buckets = new Map<string, { count: number; resetAt: number }>();
 
@@ -110,7 +115,7 @@ async function callProvider(
     body: JSON.stringify({
       model: provider.model,
       temperature: 0.7,
-      max_tokens: 350,
+      max_tokens: 320,
       messages,
     }),
     signal,
@@ -128,6 +133,28 @@ async function callProvider(
   const reply = data.choices?.[0]?.message?.content?.trim();
   if (!reply) throw new Error(`${provider.id}:empty`);
   return reply;
+}
+
+function cacheKey(question: string, personality?: string): string {
+  return `${personality ?? "friendly"}::${question.toLowerCase().replace(/\s+/g, " ").trim()}`;
+}
+
+function readCache(key: string): string | null {
+  const hit = answerCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > CACHE_TTL_MS) {
+    answerCache.delete(key);
+    return null;
+  }
+  return hit.reply;
+}
+
+function writeCache(key: string, reply: string) {
+  if (answerCache.size >= CACHE_MAX) {
+    const oldest = answerCache.keys().next().value;
+    if (oldest) answerCache.delete(oldest);
+  }
+  answerCache.set(key, { reply, at: Date.now() });
 }
 
 function jsonError(message: string, status: number) {
@@ -179,17 +206,36 @@ export async function POST(request: Request) {
 
   // Device intents are decided locally so the answer and the action agree.
   const action = detectAction(lastUser.content, ctx);
+  const local = localAnswer(lastUser.content, ctx);
+
+  // 1. The on-device brain answers device commands, maths, conversions, dates
+  //    and known facts instantly — no network, no quota, no waiting.
+  if (local.confident !== false) {
+    return NextResponse.json({
+      reply: local.reply,
+      mode: "offline",
+      action: local.action ?? action,
+      source: "device",
+    });
+  }
+
+  // 2. A repeated question is answered from cache instead of spending quota.
+  const key = cacheKey(lastUser.content, settings.personality);
+  const cached = readCache(key);
+  if (cached) {
+    return NextResponse.json({ reply: cached, mode: "ai", action, source: "cache" });
+  }
 
   const userKey = sanitizeKey(payload.apiKey);
   const useCommunity = payload.useCommunityModel !== false;
   const chain = buildChain(userKey, useCommunity);
 
   if (chain.length === 0) {
-    const local = localAnswer(lastUser.content, ctx);
     return NextResponse.json({
       reply: local.reply,
       mode: "offline",
-      action: local.action,
+      action,
+      source: "device",
       note: "No model connected — answered on-device.",
     });
   }
@@ -206,10 +252,12 @@ export async function POST(request: Request) {
     const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
     try {
       const reply = await callProvider(provider, messages, controller.signal);
+      writeCache(key, reply);
       return NextResponse.json({
         reply,
         mode: "ai",
         action,
+        source: "model",
         model: provider.id === "community" ? "community model" : provider.model,
         provider: provider.id,
       });
@@ -222,17 +270,20 @@ export async function POST(request: Request) {
     }
   }
 
-  const local = localAnswer(lastUser.content, ctx);
   const keyRejected = failures.some(
     (f) => f.startsWith("user-key:401") || f.startsWith("user-key:403"),
   );
+  const quotaExhausted = failures.some((f) => f.startsWith("community:402"));
 
   return NextResponse.json({
     reply: local.reply,
     mode: "offline",
-    action: local.action,
+    action,
+    source: "device",
     note: keyRejected
       ? "That saved key was rejected — check it in Settings."
-      : "Could not reach a model; answered on-device.",
+      : quotaExhausted
+        ? "The shared model is busy right now — add your own AI key in Settings for instant answers."
+        : "Could not reach a model; answered on-device.",
   });
 }
