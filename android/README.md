@@ -17,6 +17,28 @@ Android module adds what the browser cannot do:
 | Owner voice | `VoiceEnrollment` — local pitch/brightness profile used to gate responses |
 | AI + memory | `ChatClient` — posts the rolling conversation to `/api/chat` on the deployed web app |
 
+## Dependency scanning
+
+The repository's dependency security check resolves the web app's npm packages,
+but it cannot resolve this module. Gradle lockfiles are absent, and producing
+them requires a Gradle toolchain and the Android SDK — neither exists in the
+environment where the web app is built and deployed. So the Android module is
+reported as **uncovered**, not as clean.
+
+To close that gap on a machine with Android Studio (or a Gradle install):
+
+```bash
+# from android/
+# 1. Enable dependency locking once, in app/build.gradle.kts:
+#    android { dependencyLocking { lockAllConfigurations() } }
+# 2. Generate the wrapper, then the lockfiles
+gradle wrapper --gradle-version 8.9
+./gradlew dependencies --write-locks
+```
+
+Commit the resulting `gradle.lockfile` files. The scanner can then evaluate the
+resolved Android dependencies, and this module stops being a coverage gap.
+
 ## Build
 
 ```bash
