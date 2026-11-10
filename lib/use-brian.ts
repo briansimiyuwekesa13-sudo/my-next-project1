@@ -319,6 +319,9 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            // The live utterance travels separately from the history so the
+            // server never has to guess which turn it is answering.
+            message: text,
             messages: turns,
             settings: {
               assistantName: settingsRef.current.assistantName,
@@ -328,30 +331,51 @@ export function useBrian(settings: AssistantSettings, updateSettings: (patch: Pa
             timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             // Sent per request only; the server never stores or logs it.
             apiKey: settingsRef.current.apiKey || undefined,
-            useCommunityModel: settingsRef.current.useCommunityModel !== false,
           }),
         });
-        if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-        const data = (await response.json()) as {
+        const data = (await response.json().catch(() => null)) as {
           reply?: string;
+          error?: string;
+          hint?: string;
           mode?: "ai" | "offline";
           action?: AssistantAction;
           model?: string;
           note?: string;
-        };
-        const reply = (data.reply ?? "").trim() || "I'm here, but I didn't catch that.";
+          code?: string;
+        } | null;
+
+        if (!response.ok) {
+          // Groq failures arrive already mapped (rejected key, missing model,
+          // rate limit), so the user hears what went wrong and what to do.
+          const spoken =
+            (data?.reply ?? data?.error ?? "").trim() ||
+            "I couldn't reach my brain just now. Check the connection and try me again.";
+          append({
+            id: newId(),
+            role: "assistant",
+            content: spoken,
+            at: Date.now(),
+            mode: "offline",
+            note: data?.hint,
+          });
+          setAiMode("offline");
+          speak(spoken);
+          return;
+        }
+
+        const reply = (data?.reply ?? "").trim() || "I'm here, but I didn't catch that.";
         append({
           id: newId(),
           role: "assistant",
           content: reply,
           at: Date.now(),
-          mode: data.mode ?? "offline",
-          action: data.action,
-          note: data.note,
+          mode: data?.mode ?? "offline",
+          action: data?.action,
+          note: data?.note,
         });
-        setAiMode(data.mode ?? "offline");
-        if (data.model) setModel(data.model);
-        handleAction(data.action);
+        setAiMode(data?.mode ?? "offline");
+        if (data?.model) setModel(data.model);
+        handleAction(data?.action);
         speak(reply);
       } catch {
         const fallback = "I couldn't reach my brain just now. Check the connection and try me again.";

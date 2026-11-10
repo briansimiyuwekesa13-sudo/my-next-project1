@@ -9,7 +9,8 @@
     "start": "next start -H 0.0.0.0 -p 3000",
     "typecheck": "tsc --noEmit",
     "qa:chat": "node scripts/qa-chat.mjs",
-    "qa:voice": "tsx scripts/qa-voice-guard.ts"
+    "qa:voice": "tsx scripts/qa-voice-guard.ts",
+    "qa:groq": "node scripts/qa-groq.mjs"
   },
   "engines": {
     "node": ">=20"

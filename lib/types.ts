@@ -63,10 +63,8 @@ export interface AssistantSettings {
   language: string;
   continuousListening: boolean;
   ownerOnly: boolean;
-  /** Optional model key supplied by the user. Stored on this device only. */
+  /** Optional Groq API key supplied by the user. Stored on this device only. */
   apiKey: string;
-  /** Allow the keyless community model when no key is configured. */
-  useCommunityModel: boolean;
   /** Let the assistant check in after a stretch of silence. */
   checkInEnabled: boolean;
   /** Seconds of silence before the first check-in. */
@@ -85,7 +83,6 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   continuousListening: false,
   ownerOnly: false,
   apiKey: "",
-  useCommunityModel: true,
   checkInEnabled: true,
   checkInSeconds: 120,
 };

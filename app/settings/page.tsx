@@ -20,7 +20,7 @@ function KeyField({
   return (
     <div style={{ marginTop: 14 }}>
       <label htmlFor="model-key" style={{ fontSize: 12.5, fontWeight: 600 }}>
-        Your AI model key {saved ? "\u2014 saved on this device" : "(optional)"}
+        Your Groq API key {saved ? "\u2014 saved on this device" : "(optional)"}
       </label>
       <div className="row" style={{ gap: 8, marginTop: 8 }}>
         <input
@@ -28,7 +28,7 @@ function KeyField({
           type="password"
           autoComplete="off"
           spellCheck={false}
-          placeholder={saved ? "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" : "sk-..."}
+          placeholder={saved ? "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" : "gsk_..."}
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           style={{
@@ -124,6 +124,7 @@ export default function SettingsPage() {
   const [profile, setProfile] = useState<VoiceProfile | null>(null);
   const [enrolling, setEnrolling] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
@@ -192,6 +193,38 @@ export default function SettingsPage() {
     } catch {
       setEnrolling(false);
       setNotice("Microphone permission was denied, so I can't create a voice profile.");
+    }
+  };
+
+  const testConnection = async () => {
+    if (checking) return;
+    setChecking(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/groq/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: settings.apiKey || undefined }),
+      });
+      const data = (await response.json().catch(() => null)) as {
+        ok?: boolean;
+        model?: string;
+        latencyMs?: number;
+        message?: string;
+        hint?: string;
+      } | null;
+      if (data?.ok) {
+        setAi({ mode: "ai", model: data.model ?? null });
+        setNotice(`Connected to ${data.model} in ${data.latencyMs} ms.`);
+      } else {
+        setNotice(
+          [data?.message, data?.hint].filter(Boolean).join(" ") || "The connection test failed.",
+        );
+      }
+    } catch {
+      setNotice("Couldn't reach the server to test the key.");
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -434,7 +467,9 @@ export default function SettingsPage() {
         <h2>Intelligence</h2>
         <p className="hint">
           {ai?.mode === "ai"
-            ? `Connected to ${ai.model ?? "an AI model"} for open-ended conversation, with on-device fallback.`
+            ? settings.apiKey
+              ? `Groq (${ai.model ?? "openai/gpt-oss-120b"}) answers every question with your saved key.`
+              : `Groq (${ai.model ?? "openai/gpt-oss-120b"}) is ready — paste your key below to switch it on.`
             : ai?.mode === "offline"
               ? "Running the on-device brain: time, alarms, reminders, calls, apps, settings and small talk all work without a model key."
               : "Checking which brain is available…"}
@@ -447,20 +482,32 @@ export default function SettingsPage() {
           saved={Boolean(settings.apiKey)}
           onSave={(key) => {
             update({ apiKey: key });
-            setNotice("Model key saved on this device.");
+            setNotice("Groq key saved on this device.");
           }}
           onClear={() => {
             update({ apiKey: "" });
-            setNotice("Model key removed from this device.");
+            setNotice("Groq key removed from this device.");
           }}
         />
 
-        <Toggle
-          checked={settings.useCommunityModel !== false}
-          onChange={(next) => update({ useCommunityModel: next })}
-          label="Community model fallback"
-          hint="When no key is saved, open-ended questions go to a shared public model. It is rate-limited, so a key of your own gives instant, private answers. Turn this off to keep every question on-device."
-        />
+        <div className="row" style={{ padding: "12px 0", borderTop: "1px solid rgba(126,158,214,0.1)" }}>
+          <div className="grow">
+            <strong style={{ fontSize: 13.5 }}>Connection</strong>
+            <div className="sub" style={{ color: "var(--muted)", fontSize: 11.5, lineHeight: 1.5 }}>
+              {checking
+                ? "Talking to Groq…"
+                : "Send one small request to Groq to confirm the saved key and model actually work."}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void testConnection()}
+            disabled={checking}
+          >
+            {checking ? "Testing…" : "Test connection"}
+          </button>
+        </div>
       </section>
 
       <section className="card">

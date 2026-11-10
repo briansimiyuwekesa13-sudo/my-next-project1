@@ -14,6 +14,12 @@ export interface LocalAnswer {
   action?: AssistantAction;
   /** False when the on-device brain had no confident answer. */
   confident?: boolean;
+  /**
+   * True for exact, instant answers (time, date, maths, conversions, coin flips)
+   * that must never be routed to the model: a language model can get them
+   * subtly wrong, and they have to work with no API key at all.
+   */
+  deterministic?: boolean;
 }
 
 /* ------------------------------------------------------------------ *
@@ -601,10 +607,10 @@ export function localAnswer(input: string, ctx: AnswerContext): LocalAnswer {
 
   // Time & date
   if (/\b(what|tell me).{0,12}\b(time|clock)\b|\bwhat time is it\b|\btime now\b/.test(norm)) {
-    return { reply: `It's ${formatClock(now, ctx.timeZone)}.` };
+    return { reply: `It's ${formatClock(now, ctx.timeZone)}.`, deterministic: true };
   }
   if (/\b(what|which).{0,12}\b(day|date)\b|\btoday's date\b|\bwhat is today\b/.test(norm)) {
-    return { reply: `Today is ${formatDay(now, ctx.timeZone)}.` };
+    return { reply: `Today is ${formatDay(now, ctx.timeZone)}.`, deterministic: true };
   }
 
   // Identity & personality
@@ -652,20 +658,20 @@ export function localAnswer(input: string, ctx: AnswerContext): LocalAnswer {
     };
   }
   if (/\b(flip a coin|toss a coin)\b/.test(norm)) {
-    return { reply: `It's ${Math.random() < 0.5 ? "heads" : "tails"}.` };
+    return { reply: `It's ${Math.random() < 0.5 ? "heads" : "tails"}.`, deterministic: true };
   }
   if (/\b(roll a dice|roll a die|roll the dice)\b/.test(norm)) {
-    return { reply: `You rolled a ${1 + Math.floor(Math.random() * 6)}.` };
+    return { reply: `You rolled a ${1 + Math.floor(Math.random() * 6)}.`, deterministic: true };
   }
 
   const math = tryMath(norm);
-  if (math) return { reply: math };
+  if (math) return { reply: math, deterministic: true };
 
   const conversion = tryConversion(norm);
-  if (conversion) return { reply: conversion };
+  if (conversion) return { reply: conversion, deterministic: true };
 
   const dateMath = tryDateMath(norm, now);
-  if (dateMath) return { reply: dateMath };
+  if (dateMath) return { reply: dateMath, deterministic: true };
 
   const wordPlay = tryWordPlay(norm);
   if (wordPlay) return { reply: wordPlay };
@@ -701,10 +707,20 @@ export function buildSystemPrompt(settings: Partial<AssistantSettings>, ctx: Ans
   return [
     `You are ${name}, a personal voice assistant that the user talks to out loud.`,
     `Personality: ${personality}`,
+    "Character: friendly but never childish; confident without being arrogant; naturally conversational; analytical and curious; able to explain complicated ideas in plain words.",
     "Your replies are spoken aloud by a text-to-speech engine, so:",
     "- Answer in plain conversational sentences. Never use markdown, bullet points, emoji or code blocks.",
     "- Keep most answers to one to three sentences unless the user asks for detail.",
     "- Write numbers and units the way a person would say them.",
+    "- Sound like a thoughtful person talking, not a customer-service script.",
+    "",
+    "How you follow a conversation:",
+    "- Keep the thread. Questions like \"and tomorrow?\", \"what about the second one?\" or \"why?\" build on what was just said; resolve them from the conversation instead of asking the user to repeat themselves.",
+    "- Remember what the user tells you in this conversation (names, plans, preferences) and use it without being reminded.",
+    "- Speech recognition sometimes drops words or cuts a sentence short. Infer the most likely meaning from the context and answer that; ask one short clarifying question only when a guess would be wrong.",
+    "- Never repeat an answer you already gave in this conversation. Add something new or say it differently.",
+    "- Answer the question that was actually asked, then stop. No filler like \"great question\" and no restating the question.",
+    "- Think it through when the question needs reasoning, but say only the conclusion out loud.",
     "- Never describe yourself as an AI language model; you are simply ${name}.".replace("${name}", name),
     "Remember the conversation so far and use it — follow-up questions like “and tomorrow?” must make sense.",
     `Right now it is ${time} on ${day}${ctx.timeZone ? ` (${ctx.timeZone})` : ""}.`,
