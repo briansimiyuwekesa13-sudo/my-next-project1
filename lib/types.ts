@@ -67,6 +67,10 @@ export interface AssistantSettings {
   apiKey: string;
   /** Allow the keyless community model when no key is configured. */
   useCommunityModel: boolean;
+  /** Let the assistant check in after a stretch of silence. */
+  checkInEnabled: boolean;
+  /** Seconds of silence before the first check-in. */
+  checkInSeconds: number;
 }
 
 export const DEFAULT_SETTINGS: AssistantSettings = {
@@ -82,4 +86,6 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   ownerOnly: false,
   apiKey: "",
   useCommunityModel: true,
+  checkInEnabled: true,
+  checkInSeconds: 120,
 };
